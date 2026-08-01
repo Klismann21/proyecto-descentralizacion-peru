@@ -1,5 +1,7 @@
-data/bronze/
-data/silver/
+data/bronze/*
+!Data/bronze/.gitkeep
+data/silver/*
+!Data/silver/.gitkeep
 __pycache__/
 *.pyc
 .env
