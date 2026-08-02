@@ -66,6 +66,17 @@ def tipar_columnas(df):
     return df
 
 
+def filtrar_partidas_sin_ejecucion(df):
+    antes = len(df)
+    sin_ejecucion = (df["MONTO_PIA"] == 0) & (df["MONTO_PIM"] == 0) & (df["MONTO_RECAUDADO"] == 0)
+    df = df[~sin_ejecucion].copy()
+    print(
+        f"Filtro partidas sin ejecucion (PIA=PIM=RECAUDADO=0): {antes} -> {len(df)} filas "
+        f"(se excluyeron {sin_ejecucion.sum()})"
+    )
+    return df
+
+
 def recortar_columnas(df):
     return df[COLUMNAS_FINALES].copy()
 
@@ -138,6 +149,7 @@ def main():
     df = construir_ubigeo(df)
     df = filtrar_nivel_gobierno(df)
     df = tipar_columnas(df)
+    df = filtrar_partidas_sin_ejecucion(df)
     df = recortar_columnas(df)
     validar(df)
     guardar(df)
