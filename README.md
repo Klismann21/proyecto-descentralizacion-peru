@@ -104,7 +104,16 @@ ese subconjunto, no sobre el total nacional.
 El proyecto sigue una **arquitectura Medallion**, que separa los datos en
 tres capas según su nivel de procesamiento:
 
-<pre> ``` FUENTES BRONZE SILVER GOLD ───────── ───────── ───────── ───────── MEF (2) → Archivos → Datos → Tablas INEI (1) crudos limpios analíticas sin tocar en Parquet en SQL Server ↓ Power BI ``` </pre>
+<pre>
+````
+   FUENTES              BRONZE              SILVER               GOLD
+  ─────────           ─────────           ─────────           ─────────
+   MEF (2)      →     Archivos      →     Datos          →    Tablas
+   INEI (1)           crudos              limpios             analíticas
+                      sin tocar           en Parquet          en SQL Server
+                                                                   ↓
+                                                              Power BI
+</pre>
 
 | Capa | Qué contiene | Herramienta |
 |------|--------------|-------------|
