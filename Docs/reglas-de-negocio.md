@@ -40,9 +40,12 @@ sección "Reglas de negocio (CONGELADAS)" más abajo.
   - `Data/silver/meta_predial/meta_predial.parquet` (3,943 filas, 22 columnas)
   - `Data/silver/renamu/renamu.parquet` (7,547 filas, 117 columnas)
   - Verificado además el cruce por UBIGEO entre las 3 fuentes.
-- Siguiente paso: capa Gold en SQL Server (cruces por UBIGEO entre las
-  tres fuentes, cálculo de autonomía fiscal, agregaciones y benchmarks),
-  para luego conectar Power BI a las tablas Gold.
+- Silver ya está cargado en SQL Server (base `GoldFiscal`, esquema
+  `silver`), verificado fila por fila y monto por monto contra los 3
+  Parquet de origen (ver "Carga de Silver a SQL Server" más abajo).
+- Siguiente paso: transformaciones Gold en T-SQL (cruces por UBIGEO
+  entre las tres fuentes, cálculo de autonomía fiscal, agregaciones y
+  benchmarks), para luego conectar Power BI a las tablas Gold.
 
 ### Cómo quiero trabajar
 Explícame cada cambio que propongas antes de aplicarlo. Estoy aprendiendo
@@ -311,6 +314,78 @@ y necesito entender el porqué, no solo el código.
   Provinciales y Distritales. La columna se conserva por si acaso, pero
   no hace falta filtrar Centros Poblados en este dataset.
 
+### Carga de Silver a SQL Server
+- Base de datos **`GoldFiscal`**, esquema **`silver`** (las 3 tablas
+  cargadas son copia fiel del Parquet, todavía no son Gold). El esquema
+  `gold` con las tablas transformadas se crea recién cuando se construyan
+  las transformaciones T-SQL — no se creó antes por no tener aún
+  definida su forma real (ver "Fuera de alcance" en
+  `Docs/plan-carga-sql.md`).
+- Autenticación: **Windows / Trusted Connection**, sin usuario ni
+  contraseña — instancia local (`DESKTOP-Q808V1O\SQLEXPRESS`, instancia
+  con nombre, no la instancia default). Config en `.env` (no
+  versionado): `SQL_SERVER`, `SQL_DATABASE`, `SQL_DRIVER`,
+  `SQL_TRUSTED_CONNECTION`.
+- `TrustServerCertificate=yes` es obligatorio en la cadena de conexión:
+  el driver ODBC 18 cambia el default de `Encrypt` a `yes` respecto al
+  17, y sin este parámetro la conexión contra la instancia local (con
+  certificado no confiable) falla por SSL.
+- Montos en soles: **`DECIMAL(18,2)`**, no `FLOAT`. El Parquet los trae
+  en `float64`, pero sumar dinero en punto flotante arrastra error de
+  redondeo; `DECIMAL` es exacto para valores que se van a sumar en la
+  fórmula de autonomía y en agregaciones de Gold. Verificado: los
+  totales de `MONTO_PIA`/`MONTO_PIM`/`MONTO_RECAUDADO` y de las 9
+  columnas `MON_*` de meta_predial coinciden exacto (diferencia 0.00)
+  entre SQL Server y Parquet.
+- Columnas calculadas por división (`CUMPLIMIENTO_META_PREDIAL`,
+  `PCT_PERSONAL_NOMBRADO`) quedan como `FLOAT NULL`, con `inf`/`NaN`
+  convertidos a `NULL` **solo al insertar** (`df.replace([np.inf,
+  -np.inf], np.nan)` seguido de convertir todo `NaN` a `None` de
+  Python). No es una corrección de datos: el significado ("sin dato
+  para calcular esta métrica") es el mismo que en Silver, y las
+  columnas `FLAG_*` que ya marcan estos casos no cambian — es solo un
+  ajuste de formato, porque T-SQL `float` no soporta los valores
+  especiales IEEE `inf`/`NaN`. Verificado: la cantidad de `NULL` en SQL
+  coincide exacto con la cantidad de `inf`/`NaN` del Parquet (1,287 en
+  meta_predial).
+- Llaves: `silver.ingreso` usa una **llave sustituta**
+  (`ID_INGRESO INT IDENTITY`) porque no tiene llave natural — hay
+  26,293 filas duplicadas completas en el Parquet, partidas
+  presupuestales distintas que quedan iguales tras el recorte de
+  columnas de Silver (mismo fenómeno de "Filtro de partidas sin
+  ejecución" más arriba). `silver.meta_predial` usa
+  `(SEC_EJEC, ANO_ESTADISTICA)` y `silver.renamu` usa `(UBIGEO, ANO)`
+  como llave primaria natural — verificado sin duplicados en ambos
+  casos antes de cargar.
+- Las 90 columnas `P23_*` de `silver.renamu` **no están escritas a mano**
+  en el DDL: `SQL/ddl/02_crear_esquema_y_tablas.sql` tiene un marcador
+  de texto en su lugar, que `Src/gold/cargar_silver.py` reemplaza en
+  tiempo de ejecución leyendo los nombres reales de columna del Parquet
+  de renamu (mismo criterio de prefijo `"P23_"` que ya usa
+  `Src/silver/construir_renamu.py`), para que la tabla nunca se
+  desincronice del dato real.
+- Carga por lotes de **50,000 filas** solo para `silver.ingreso` (2.7M
+  filas) — `meta_predial` y `renamu` se cargan en una sola pasada por
+  ser chicas. `cursor.fast_executemany = True` en las 3 tablas (sin
+  esto, cada fila viaja al servidor por separado; con 2.7M filas la
+  diferencia es de horas a minutos).
+- Carga idempotente: `truncar_tablas()` vacía las 3 tablas (`TRUNCATE
+  TABLE`, no `DELETE`, para no arrastrar el costo de borrar fila por
+  fila y para que `ID_INGRESO` reinicie su contador `IDENTITY` a 1) antes
+  de insertar. Se puede re-ejecutar el proceso de carga las veces que
+  haga falta sin duplicar filas ni violar llaves primarias.
+- Creación de esquema (`crear_database()` + `rellenar_query()`) queda
+  **separada** del flujo de recarga (`truncar_tablas()` + los 3
+  `cargar_*()`, agrupados en `main()`): el `CREATE TABLE` no tiene
+  resguardo `IF NOT EXISTS`, así que solo se corre una vez (setup
+  inicial) o si se necesita rehacer el esquema desde cero — no en cada
+  recarga de datos. Ver "Comandos" más abajo.
+- Verificado end-to-end tras la carga completa: conteo de filas exacto
+  en las 3 tablas, totales de montos exactos, `UBIGEO` conserva los
+  ceros a la izquierda (no se corrompió a numérico), y el caso de
+  referencia de San Isidro (`UBIGEO 150131`, 2024) coincide con el
+  valor ya verificado en Parquet.
+
 ### Segmentación geográfica
 - Una sola columna con: Lima Metropolitana / Lima Provincias / Norte /
   Centro / Sur / Oriente. Cada departamento cae en exactamente una.
@@ -325,6 +400,18 @@ pip install -r requirements.txt
 Descargar todas las fuentes a la capa Bronze (ingreso, meta_predial y RENAMU):
 ```
 python Src/ingesta/descargar_bronze.py
+```
+
+Crear la base de datos `GoldFiscal` y el esquema/tablas `silver.*` (solo la
+primera vez, o si hay que rehacer el esquema desde cero):
+```
+python Src/gold/cargar_silver.py --setup
+```
+
+Cargar (o recargar) los 3 Parquet de Silver a SQL Server — vacía las 3
+tablas y las vuelve a llenar, se puede correr las veces que haga falta:
+```
+python Src/gold/cargar_silver.py
 ```
 
 Por ahora no hay tests, lint ni build configurados en el repo.
@@ -365,6 +452,56 @@ Tres scripts en `Src/silver/`, uno por fuente, mismo estilo procedural
   PCT_PERSONAL_NOMBRADO, valida y guarda en
   `Data/silver/renamu/renamu.parquet`.
 
-Todavía no existe código para la capa Gold. Gold se construye en SQL
-Server a partir de las 3 tablas Silver en Parquet. Ver "Reglas de
-negocio (CONGELADAS)" arriba para los parámetros exactos.
+## Arquitectura del código de carga a SQL Server
+
+`Src/gold/` tiene el código que conecta y carga Silver a SQL Server:
+
+- `conexion.py`: lee `.env` (vía `python-dotenv`) y arma la cadena de
+  conexión ODBC. `obtener_motor(base_datos=None)` devuelve un motor de
+  SQLAlchemy (`fast_executemany=True`); sin argumento se conecta a la
+  base de `SQL_DATABASE` (`GoldFiscal`), con `"master"` se conecta a la
+  base de sistema (necesaria para poder crear `GoldFiscal`, ya que no
+  se puede crear una base estando conectado a ella misma).
+- `cargar_silver.py`, un `.py` que orquesta todo (no reemplaza al SQL,
+  lo ejecuta):
+  - `crear_database()`: conecta a `master` en modo `AUTOCOMMIT`
+    (`CREATE DATABASE` no puede correr dentro de una transacción) y
+    ejecuta `SQL/ddl/01_crear_database.sql`.
+  - `rellenar_query()`: lee el Parquet de renamu para sacar los nombres
+    reales de las columnas `P23_*`, arma ese bloque de texto, reemplaza
+    el marcador dentro de `SQL/ddl/02_crear_esquema_y_tablas.sql` y lo
+    ejecuta contra `GoldFiscal` — crea el esquema `silver` y las 3
+    tablas.
+  - `cargar_meta_predial()` / `cargar_renamu()`: leen su Parquet,
+    convierten `inf`/`NaN`/`pd.NA` a `None` de Python
+    (`df.replace([np.inf, -np.inf], np.nan)` +
+    `df.astype(object).where(pd.notna(df), None)`), arman el `INSERT`
+    a partir de las columnas del propio DataFrame, y lo ejecutan de una
+    sola vez con `cursor.fast_executemany = True`.
+  - `cargar_ingreso()`: mismo patrón, pero en lotes de 50,000 filas —
+    un `for` con `range(0, total, tamano_lote)` y slicing de la lista
+    de registros, con `commit()` y un `print()` de progreso por lote.
+  - `truncar_tablas()`: `TRUNCATE TABLE` de las 3 tablas antes de
+    cargar, para que el proceso sea idempotente (re-ejecutable sin
+    duplicar filas ni violar llaves primarias) y para que `ID_INGRESO`
+    reinicie su `IDENTITY` a 1 en cada recarga.
+  - `main()`: agrupa el flujo de recarga —
+    `truncar_tablas()` + `cargar_meta_predial()` + `cargar_renamu()` +
+    `cargar_ingreso()`, en ese orden. **No** incluye `crear_database()`
+    ni `rellenar_query()` (ver más abajo, por qué quedan separados).
+  - `if __name__ == "__main__":` con un flag simple por `sys.argv`: con
+    `--setup` corre `crear_database()` + `rellenar_query()` (setup
+    inicial, una sola vez); sin argumentos corre `main()` (recarga
+    normal). Ver comandos exactos en "Comandos" más arriba.
+- `SQL/ddl/01_crear_database.sql`: `CREATE DATABASE GoldFiscal` con
+  chequeo `IF NOT EXISTS` contra `sys.databases`.
+- `SQL/ddl/02_crear_esquema_y_tablas.sql`: `CREATE SCHEMA silver`
+  (envuelto en `EXEC(...)`, porque `CREATE SCHEMA` debe ser la única
+  sentencia de su batch) y los 3 `CREATE TABLE` (`ingreso`,
+  `meta_predial`, `renamu`), este último con el marcador de columnas
+  `P23_*` que resuelve `cargar_silver.py`.
+
+Las transformaciones Gold en T-SQL (cruces por UBIGEO, autonomía fiscal,
+agregaciones, benchmarks) todavía no existen — son el siguiente paso,
+sobre las tablas `silver.*` que ya están cargadas y verificadas. Ver
+"Reglas de negocio (CONGELADAS)" arriba para los parámetros exactos.
