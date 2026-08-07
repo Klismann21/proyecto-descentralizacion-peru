@@ -43,9 +43,17 @@ sección "Reglas de negocio (CONGELADAS)" más abajo.
 - Silver ya está cargado en SQL Server (base `GoldFiscal`, esquema
   `silver`), verificado fila por fila y monto por monto contra los 3
   Parquet de origen (ver "Carga de Silver a SQL Server" más abajo).
-- Siguiente paso: transformaciones Gold en T-SQL (cruces por UBIGEO
-  entre las tres fuentes, cálculo de autonomía fiscal, agregaciones y
-  benchmarks), para luego conectar Power BI a las tablas Gold.
+- La capa Gold ya arrancó: 2 dimensiones (`gold.UBICACION`,
+  `gold.RUBRO`) y la primera tabla de hechos (`gold.AUTONOMIA_FISCAL`,
+  vía el stored procedure `gold.sp_cargar_autonomia_fiscal`) están
+  construidas y verificadas (ver subsecciones "Construcción de Gold"
+  más abajo). Primer número real del proyecto: la autonomía fiscal
+  promedio de las municipalidades peruanas (Gobiernos Locales,
+  2022-2025) es **11.75%**.
+- Siguiente paso: seguir con las transformaciones Gold que faltan
+  (cumplimiento predial Lima vs. regiones, benchmark contra pares,
+  cruce estructura municipal / cumplimiento), para luego conectar
+  Power BI a las tablas Gold.
 
 ### Cómo quiero trabajar
 Explícame cada cambio que propongas antes de aplicarlo. Estoy aprendiendo
@@ -386,6 +394,121 @@ y necesito entender el porqué, no solo el código.
   referencia de San Isidro (`UBIGEO 150131`, 2024) coincide con el
   valor ya verificado en Parquet.
 
+### Construcción de Gold: dimensión geográfica (`gold.UBICACION`)
+- Grano: **una fila por provincia** (196 filas, verificado contra
+  `silver.ingreso`), no por departamento. Se descartó un diseño previo
+  de "departamento + provincia opcional (`NULL`)" — con ese diseño, un
+  `JOIN` contra `silver.ingreso` con una condición permisiva
+  (`CODIGO_PROVINCIA IS NULL OR ...`) hacía que una misma fila de
+  `ingreso` (ej. Lima Metropolitana) matcheara **a la vez** contra la
+  fila general del departamento Y contra la fila específica de la
+  excepción, duplicando el monto en cualquier agregación por
+  macrorregión. Se corrigió pasando a grano único (provincia), sin
+  mezclar niveles de precisión en la misma tabla.
+- `PREFIJO_UBIGEO VARCHAR(4)` (departamento+provincia, los primeros 4
+  dígitos del UBIGEO) es la llave primaria natural — no hace falta
+  llave sustituta porque, al ser grano único, cada fila es una
+  provincia real y `NOMBRE_PROVINCIA` siempre tiene valor (`NOT NULL`).
+- Carga: `INSERT ... SELECT DISTINCT` directo desde `silver.ingreso`
+  (no valores escritos a mano) — se verificó primero que cada
+  `PREFIJO_UBIGEO` tiene siempre el mismo par de nombres
+  departamento/provincia en las 4 fuentes/años, sin inconsistencias de
+  grafía que pudieran duplicar la llave primaria.
+- `MACRO_REGION` se llena con un `UPDATE` + `CASE` por código de
+  departamento (`LEFT(PREFIJO_UBIGEO,2)`), con 2 excepciones puntuales
+  evaluadas ANTES que la regla general (el orden importa en un
+  `CASE`): Lima capital (`1501`) y Callao (`0701`) → "Lima
+  Metropolitana"; el resto del departamento Lima (`15`) → "Lima
+  Provincias". El resto de los 23 departamentos se clasifica en
+  Norte/Centro/Sur/Oriente por código. Verificado: los 24 departamentos
+  + Callao quedan cubiertos sin huecos (como `MACRO_REGION` es
+  `NOT NULL` y el `CASE` no tiene `ELSE`, cualquier código sin cubrir
+  hubiera hecho fallar el `UPDATE` — no falló).
+- Distribución final verificada: Norte 59, Sur 59, Centro 35, Oriente
+  32, Lima Provincias 9, Lima Metropolitana 2 (196 provincias en total).
+
+### Construcción de Gold: dimensión de rubro (`gold.RUBRO`)
+- Clasifica los **7 valores reales** de `RUBRO_NOMBRE` que existen en
+  `silver.ingreso` (verificado contra el servidor, no de memoria) en 4
+  categorías: `RECURSOS_PROPIOS`, `TRANSFERENCIA`, `CANON`, `DEUDA`. Un
+  quinto grupo teórico (`OTROS` / `CONTRIBUCIONES A FONDOS`) no se
+  incluyó porque ese rubro no existe en Silver — ya está documentado
+  arriba que el "Filtro de partidas sin ejecución" lo elimina por
+  completo (todas sus filas eran 0).
+- Dos banderas `BIT`, en vez de repetir listas `IN (...)` en cada
+  consulta de autonomía: `ES_NUMERADOR_AUTONOMIA` (1 solo para
+  `RECURSOS_PROPIOS`) y `ENTRA_EN_DENOMINADOR` (0 solo para `DEUDA`).
+  La fórmula de autonomía fiscal queda expresada como dato consultable,
+  no como lógica repetida y copiada en cada script.
+- Verificado: cobertura 100% contra `silver.ingreso` (ningún
+  `RUBRO_NOMBRE` de `ingreso` se queda sin clasificar), y la fórmula de
+  autonomía calculada con las banderas reproduce exacto los totales ya
+  conocidos: numerador `44,412,227,331.50` (RDR + Impuestos
+  Municipales), denominador `228,261,343,063.96` (total recaudado
+  menos deuda), autonomía global `19.46%`.
+
+### Construcción de Gold: tabla de hechos de autonomía fiscal (`gold.AUTONOMIA_FISCAL`)
+- Grano: **municipalidad-año** (`UBIGEO`, `ANO`), ~7,500 filas — colapsa
+  los 12 meses de `MES_DOC` al sumar. Limitación documentada a
+  propósito: esta tabla NO sirve para ver estacionalidad dentro de un
+  año, solo para el indicador anual de autonomía. Si en algún momento
+  hace falta estacionalidad, sería una tabla aparte, no se fuerza acá.
+- Filtro: solo `NIVEL_GOBIERNO_NOMBRE = 'GOBIERNOS LOCALES'` (aplica la
+  regla ya congelada en "Filtro de niveles de gobierno" más arriba) —
+  los Gobiernos Regionales quedan fuera porque, por diseño, casi no
+  generan ingresos propios; compararlos con Locales sería injusto.
+- Se guardan los **componentes**, no solo el ratio final:
+  `MONTO_RECURSOS_PROPIOS`, `MONTO_TRANSFERENCIAS`, `MONTO_CANON`,
+  `MONTO_DEUDA`, `MONTO_TOTAL_SIN_DEUDA` — para que un dashboard pueda
+  mostrar montos en soles además de porcentajes.
+  `MONTO_TOTAL_SIN_DEUDA` NO incluye a `MONTO_DEUDA` (por diseño, la
+  deuda queda fuera del denominador — ver "Fórmula de autonomía
+  fiscal"); se guardan ambos como columnas separadas para no perder el
+  dato de deuda, pero no se suman entre sí.
+- `PREFIJO_UBIGEO` (4 dígitos) se guarda precalculado como columna,
+  para unir directo con `gold.UBICACION` sin recalcular
+  `LEFT(UBIGEO,4)` en cada consulta futura.
+- `RATIO_AUTONOMIA = CAST(MONTO_RECURSOS_PROPIOS AS FLOAT) /
+  NULLIF(MONTO_TOTAL_SIN_DEUDA, 0)` — queda `NULL`, no se excluye la
+  fila, cuando el denominador es 0 (mismo criterio que
+  `CUMPLIMIENTO_META_PREDIAL` en `meta_predial`). El `CAST AS FLOAT`
+  fuerza división de punto flotante — dividir dos `DECIMAL` en T-SQL
+  puede truncar precisión de forma no evidente.
+- Se construye con **stored procedure**
+  (`gold.sp_cargar_autonomia_fiscal`), no con un script de carga
+  suelto — primer procedimiento del proyecto, patrón que se repite para
+  el resto de las transformaciones Gold (a diferencia de las
+  dimensiones, que son datos fijos cargados con `INSERT` directo). Usa
+  un CTE (`WITH AGREGADO AS (...)`) para calcular las sumas una sola
+  vez y reutilizarlas tanto en las columnas de monto como en el ratio,
+  en vez de repetir la misma expresión `SUM(CASE...)` dos veces.
+- Nota técnica: `CREATE OR ALTER PROCEDURE` debe ser la única sentencia
+  de su batch (misma restricción que `CREATE SCHEMA`, ver "Carga de
+  Silver a SQL Server") — el `.sql` tiene el `CREATE TABLE` y el
+  `CREATE OR ALTER PROCEDURE` en el mismo archivo, pero quien lo
+  ejecute necesita mandarlos como 2 batches separados, no uno solo.
+- **Hallazgo y flag**: `FLAG_DENOMINADOR_NEGATIVO` (mismo espíritu que
+  los flags de `meta_predial`) marca 1 sola fila de 7,564 — `UBIGEO
+  140203` (Incahuasi, Ferreñafe, Lambayeque), año 2022 — donde el rubro
+  Canon tiene montos negativos grandes concentrados en septiembre 2022
+  (el mayor, -S/ 6,345,958), consistente con una reversión/corrección
+  contable dentro del sistema SIAF del MEF (no es el patrón de
+  corrupción de coma decimal visto en Sapallanga). Eso hace que el
+  denominador y el ratio den negativos (`-1.45`) para esa fila puntual.
+  Se conserva el dato real, marcado con la bandera, no se corrige ni se
+  excluye.
+- Verificado: 7,564 filas (municipalidad-año, Locales, 2022-2025);
+  cobertura 100% de `RUBRO_NOMBRE` contra `gold.RUBRO` (el `INNER JOIN`
+  no descarta silenciosamente ningún rubro); `RATIO_AUTONOMIA` nunca
+  supera 1.0 fuera de la fila marcada (máximo 0.9869), confirmando que
+  ninguna categoría quedó mal clasificada entre numerador y
+  denominador; San Isidro con ratio ~0.96-0.98 (alto, coherente con ser
+  uno de los distritos con más recaudación propia del país) contra
+  distritos rurales de Amazonas con ratios desde ~0 hasta ~0.49.
+- **Autonomía fiscal promedio de las municipalidades peruanas**
+  (Gobiernos Locales, 2022-2025): **11.75%**, con tendencia levemente
+  creciente año a año (11.2% en 2022 → 12.7% en 2025).
+
 ### Segmentación geográfica
 - Una sola columna con: Lima Metropolitana / Lima Provincias / Norte /
   Centro / Sur / Oriente. Cada departamento cae en exactamente una.
@@ -501,7 +624,26 @@ Tres scripts en `Src/silver/`, uno por fuente, mismo estilo procedural
   `meta_predial`, `renamu`), este último con el marcador de columnas
   `P23_*` que resuelve `cargar_silver.py`.
 
-Las transformaciones Gold en T-SQL (cruces por UBIGEO, autonomía fiscal,
-agregaciones, benchmarks) todavía no existen — son el siguiente paso,
-sobre las tablas `silver.*` que ya están cargadas y verificadas. Ver
-"Reglas de negocio (CONGELADAS)" arriba para los parámetros exactos.
+## Arquitectura del código de transformaciones Gold
+
+`SQL/gold/` tiene el DDL y la lógica de transformación de la capa Gold
+(esquema `gold`, separado de `silver`):
+
+- `01_crear_esquema_gold.sql`: crea el esquema `gold` (mismo patrón
+  `IF NOT EXISTS` + `EXEC(...)` que `silver`) y las 2 dimensiones —
+  `CREATE TABLE gold.UBICACION` + `INSERT ... SELECT DISTINCT` desde
+  `silver.ingreso` + `UPDATE` con el `CASE` de macrorregión;
+  `CREATE TABLE gold.RUBRO` + `INSERT` con las 7 filas de clasificación
+  y sus 2 banderas. Ver el detalle de cada una en "Reglas de negocio
+  (CONGELADAS)" arriba.
+- `02_crear_autonomia_fiscal.sql`: `CREATE TABLE gold.AUTONOMIA_FISCAL`
+  + `CREATE OR ALTER PROCEDURE gold.sp_cargar_autonomia_fiscal` — el
+  procedimiento trunca la tabla y la recarga agregando `silver.ingreso`
+  (filtrado a Gobiernos Locales) por `UBIGEO`/año, usando las banderas
+  de `gold.RUBRO` para los componentes y el ratio de autonomía.
+
+Las transformaciones Gold que faltan (cumplimiento predial Lima vs.
+regiones, benchmark contra pares, cruce estructura municipal /
+cumplimiento) son el siguiente paso, sobre las tablas `silver.*` y
+`gold.*` que ya están cargadas y verificadas. Ver "Reglas de negocio
+(CONGELADAS)" arriba para los parámetros exactos.
