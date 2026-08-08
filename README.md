@@ -1,12 +1,12 @@
 # Descentralización fiscal en el Perú: ¿cuánto dinero manejan realmente las municipalidades?
 
-**No en la ley, sino en el dinero.** Este proyecto cruza tres fuentes
-públicas del MEF y el INEI para medir cuánto de sus ingresos genera cada
-municipalidad peruana por sí misma —y cuánto depende de transferencias
-desde el gobierno central— entre 2022 y 2025.
+**No en la ley, sino en el dinero.** Los gobiernos locales del Perú
+administran el 41% del presupuesto público. Pero de cada 100 soles que
+maneja la municipalidad típica, apenas 6 los generó ella misma.
 
-El resultado es un pipeline de datos completo sobre 2.7 millones de
-registros y las 1,890 municipalidades del país.
+Este proyecto cruza tres fuentes públicas del MEF y el INEI para medir esa
+brecha entre administrar recursos y ser capaz de generarlos, en las 1,890
+municipalidades del país entre 2022 y 2025.
 
 > **In brief (EN):** An end-to-end data pipeline analyzing fiscal
 > decentralization in Peru. It combines three public datasets from the
@@ -47,6 +47,63 @@ una traducida en un dashboard de decisión:
 6. **¿Qué tienen en común las municipalidades que recaudan mejor?**
    Cruce entre estructura municipal (personal, instrumentos de gestión,
    área de administración tributaria) y cumplimiento de la meta predial.
+
+## Hallazgos
+
+**El Perú descentralizó el gasto, no la recaudación.** Los gobiernos
+locales administran el 41% del presupuesto público (los regionales, 16%;
+el nacional, 43%). Sin embargo, la mediana de autonomía fiscal municipal
+es de **6.1%**: la municipalidad típica genera por sí misma seis de cada
+cien soles que administra. El promedio (11.8%) duplica a la mediana, señal
+de que unos pocos distritos con alta recaudación propia elevan la cifra
+general.
+
+**El dinero no llega donde más se gestiona, sino donde hay minas.** El Sur
+concentra el 31.4% de los recursos subnacionales —más que ninguna otra
+macrorregión— pero el 65% de lo que recaudan sus gobiernos locales es
+canon: les corresponde por su geología, no por su gestión. En los
+gobiernos locales de Lima Metropolitana el canon representa apenas el 8%.
+
+**La brecha no es capital contra provincias, es metropolitano contra todo
+lo demás.** Lima Metropolitana tiene una mediana de cumplimiento predial
+de 74%. Lima Provincias —el mismo departamento— cae a 25%, por debajo del
+Norte (28%) y del Oriente (34%). Separar ambas realidades fue una decisión
+de diseño temprana del proyecto; los datos la confirmaron.
+
+**En el tramo bajo, la administración tributaria simplemente no existe.**
+En 2022, ninguno de los 143 municipios de categoría G emitió impuesto
+predial. En 2024, de los 98 que sí emitieron, 74 (75%) no cobraron ni un
+sol de lo emitido. La mediana de cumplimiento de esa categoría es 0%.
+
+**S/ 464 millones al año quedan sin cobrar.** Si cada municipalidad
+alcanzara el cumplimiento del mejor 25% de sus pares —no un ideal
+teórico, sino lo que municipios comparables ya logran— la recaudación
+predial del país crecería en ese monto anual.
+
+### Tres hipótesis que los datos no sostuvieron
+
+**El canon no explica la baja cobranza.** En agregado, los municipios con
+alta dependencia del canon cumplen peor (33% contra 39%). Pero al
+controlar por categoría, el efecto se disuelve y cambia de dirección según
+el grupo: era composición, no causa. Los municipios con mucho canon tienden
+a ser pequeños, y el tamaño es lo que explica la diferencia.
+
+**Tener un área de administración tributaria no basta.** Entre los
+municipios con cobranza baja y los de cobranza aceptable, la proporción
+que declara tener área tributaria es prácticamente la misma (93% y 92%).
+Controlando por categoría, el efecto se invierte en los tramos E, F y G.
+
+**Dotarla de personal tampoco resulta determinante.** Ni el personal
+absoluto del área ni su proporción sobre la planilla total sostienen un
+patrón consistente al controlar por categoría. Una interpretación
+plausible —no demostrable con estos datos— es causalidad inversa: los
+municipios con problemas de cobranza son los que crean el área, no al
+revés.
+
+**Lo que sí queda en pie:** la categoría del municipio es la única
+variable que predice el desempeño de forma robusta y consistente. Las
+variables de estructura interna disponibles no agregan poder explicativo
+una vez controlado ese factor.
 
 ## Alcance
 
@@ -104,16 +161,10 @@ ese subconjunto, no sobre el total nacional.
 El proyecto sigue una **arquitectura Medallion**, que separa los datos en
 tres capas según su nivel de procesamiento:
 
-<pre>
-````
-   FUENTES              BRONZE              SILVER               GOLD
-  ─────────           ─────────           ─────────           ─────────
-   MEF (2)      →     Archivos      →     Datos          →    Tablas
-   INEI (1)           crudos              limpios             analíticas
-                      sin tocar           en Parquet          en SQL Server
-                                                                   ↓
-                                                              Power BI
-</pre>
+| | Bronze | Silver | Gold | |
+|---|---|---|---|---|
+| **Fuentes** → | Archivos crudos, sin tocar | → Datos limpios en Parquet | → Tablas analíticas en SQL Server | → **Power BI** |
+| MEF (2), INEI (1) | `requests` | `pandas` | `T-SQL` | Dashboards |
 
 | Capa | Qué contiene | Herramienta |
 |------|--------------|-------------|
@@ -182,8 +233,8 @@ justificación en [`docs/reglas-de-negocio.md`](docs/reglas-de-negocio.md).
 
 ```bash
 # 1. Clonar el repositorio
-git clone https://github.com/Klismann21/[nombre-del-repo].git
-cd [nombre-del-repo]
+git clone https://github.com/Klismann21/proyecto-descentralizacion-peru.git
+cd proyecto-descentralizacion-peru
 
 # 2. Instalar dependencias
 pip install -r requirements.txt
@@ -195,6 +246,19 @@ python Src/ingesta/descargar_bronze.py
 python Src/silver/construir_ingreso.py
 python Src/silver/construir_meta_predial.py
 python Src/silver/construir_renamu.py
+
+# 5. Crear la base de datos y las tablas Silver en SQL Server
+python Src/gold/cargar_silver.py --setup
+
+# 6. Cargar los Parquet de Silver a SQL Server
+python Src/gold/cargar_silver.py
+
+# 7. Crear los objetos de la capa Gold
+#    Ejecutar en SSMS, en orden, los scripts de SQL/gold/
+#    y luego los procedures (EXEC gold.sp_cargar_autonomia_fiscal, etc.)
+
+# 8. Cargar la tabla de contexto por nivel de gobierno
+python Src/gold/cargar_reparto_nivel_gobierno.py
 ```
 
 Cada script de Silver imprime en consola sus reportes de validación
