@@ -50,3 +50,6 @@ BEGIN
 
     PRINT 'Filas insertadas: ' + CAST(@@ROWCOUNT AS VARCHAR);
 END;
+
+
+EXEC gold.sp_cargar_autonomia_fiscal;

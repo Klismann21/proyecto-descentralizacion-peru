@@ -44,16 +44,57 @@ sección "Reglas de negocio (CONGELADAS)" más abajo.
   `silver`), verificado fila por fila y monto por monto contra los 3
   Parquet de origen (ver "Carga de Silver a SQL Server" más abajo).
 - La capa Gold ya arrancó: 2 dimensiones (`gold.UBICACION`,
-  `gold.RUBRO`) y la primera tabla de hechos (`gold.AUTONOMIA_FISCAL`,
-  vía el stored procedure `gold.sp_cargar_autonomia_fiscal`) están
-  construidas y verificadas (ver subsecciones "Construcción de Gold"
-  más abajo). Primer número real del proyecto: la autonomía fiscal
-  promedio de las municipalidades peruanas (Gobiernos Locales,
-  2022-2025) es **11.75%**.
-- Siguiente paso: seguir con las transformaciones Gold que faltan
-  (cumplimiento predial Lima vs. regiones, benchmark contra pares,
-  cruce estructura municipal / cumplimiento), para luego conectar
-  Power BI a las tablas Gold.
+  `gold.RUBRO`) y 2 tablas de hechos (`gold.AUTONOMIA_FISCAL` vía
+  `gold.sp_cargar_autonomia_fiscal`; `gold.REPARTO_TERRITORIAL` vía
+  `gold.sp_cargar_reparto_territorial`) están construidas y verificadas
+  (ver subsecciones "Construcción de Gold" más abajo). Primer número
+  real del proyecto: la autonomía fiscal promedio de las
+  municipalidades peruanas (Gobiernos Locales, 2022-2025) es **11.75%**.
+- Tabla de contexto `gold.REPARTO_NIVEL_GOBIERNO` (12 filas, Nacional/
+  Regional/Local × 2022-2025) también construida — es la única pieza
+  de Gold que lee Bronze directo, no Silver (ver subsección propia más
+  abajo).
+- `gold.CUMPLIMIENTO_PREDIAL` (3,943 filas, vía
+  `gold.sp_cargar_cumplimiento_predial`) responde las preguntas 3 y 4
+  del proyecto (cumplimiento por macrorregión y por categoría MEF).
+  Hallazgos: Lima Metropolitana cumple muy por delante del resto
+  (73% vs. 30-41%); la categoría MEF "C" tiene el mejor cumplimiento de
+  las 7 (70%, más que "A"), rompiendo el patrón esperado A>B>...>G —
+  aunque sí hay una caída clara de D a G (45%→22%, mediana de G = 0%).
+  Investigado a fondo: "C" corresponde al 100% a Lima Metropolitana
+  (P3 y P4 no son hallazgos independientes en el tramo alto); la
+  hipótesis de que el canon explica peor cumplimiento se probó y se
+  descartó (paradoja de Simpson — el efecto desaparece al controlar
+  por categoría).
+- `gold.POTENCIAL_RECAUDACION` (3,943 filas, vía
+  `gold.sp_cargar_potencial_recaudacion`) responde la pregunta 5
+  (benchmark contra pares): si cada municipalidad cobrara como el
+  mejor 25% (percentil 75) de sus pares de la misma categoría MEF y
+  año, el Perú recaudaría en promedio **S/ 464 millones más al año**
+  en impuesto predial (S/ 1,857.6M acumulados 2022-2025). Hallazgo
+  aparte, más duro que el número: en la categoría G, en 2022 el 100%
+  de los municipios no emitió predial, y en 2024 tres de cada cuatro
+  de los que sí emitieron cobraron literalmente cero — para esos
+  municipios la pregunta no es "cuánto más podrían cobrar" sino "por
+  qué no existe una administración tributaria funcionando" (conecta
+  con la pregunta 6).
+- `gold.ESTRUCTURA_MUNICIPAL` (7,547 filas, vía
+  `gold.sp_cargar_estructura_municipal`) responde la pregunta 6, la
+  última del proyecto (estructura municipal vs. cumplimiento predial).
+  Con esto, **las 6 preguntas del proyecto están respondidas** — falta
+  solo conectar Power BI a las tablas Gold.
+  Hallazgo principal: ni tener un área tributaria (sí/no), ni el
+  personal absoluto de esa área, ni la proporción de personal
+  tributario sobre el total, sostienen una relación limpia con el
+  cumplimiento una vez controlado por categoría MEF — en varias
+  categorías grandes (E, F, G) el patrón va incluso en dirección
+  contraria a lo esperado (más personal, cumplimiento igual o peor).
+  Tercera hipótesis estructural que se prueba y no se sostiene (después
+  del canon y el área tributaria binaria) — el hallazgo robusto sigue
+  siendo el tamaño/categoría del municipio, no ninguna variable
+  estructural individual medida hasta ahora.
+- Siguiente paso: conectar Power BI a las tablas Gold — la
+  construcción de datos del proyecto está completa.
 
 ### Cómo quiero trabajar
 Explícame cada cambio que propongas antes de aplicarlo. Estoy aprendiendo
@@ -507,7 +548,358 @@ y necesito entender el porqué, no solo el código.
   distritos rurales de Amazonas con ratios desde ~0 hasta ~0.49.
 - **Autonomía fiscal promedio de las municipalidades peruanas**
   (Gobiernos Locales, 2022-2025): **11.75%**, con tendencia levemente
-  creciente año a año (11.2% en 2022 → 12.7% en 2025).
+  creciente año a año (11.2% en 2022 → 12.7% en 2025). La **mediana**
+  por año, en cambio, ronda solo **6%** (0.058-0.064) — bastante más
+  baja que el promedio, señal de asimetría: pocas municipalidades con
+  autonomía alta (San Isidro y similares) empujan el promedio hacia
+  arriba, mientras la mayoría de municipios queda bastante por debajo
+  de esa cifra. Dato a tener en cuenta para cómo se presenta el
+  indicador (usar mediana, o mostrar ambas, en vez de solo el promedio).
+- El archivo `SQL/gold/02_crear_autonomia_fiscal.sql` termina con un
+  tercer batch, `EXEC gold.sp_cargar_autonomia_fiscal;` — corre el
+  archivo completo crea la tabla, define el procedimiento, Y lo ejecuta
+  una vez, dejando la tabla ya cargada (no solo definida). Quien lo
+  ejecute tiene que mandar los 3 bloques como batches separados (ver
+  nota técnica de `CREATE OR ALTER PROCEDURE` arriba).
+
+### Construcción de Gold: reparto territorial (`gold.REPARTO_TERRITORIAL`)
+- Responde la pregunta de reparto: cómo se concentra el presupuesto y
+  la recaudación en el territorio, con el corte entre Gobiernos Locales
+  y Regionales. A diferencia de `gold.AUTONOMIA_FISCAL`, **no se filtra
+  por nivel de gobierno** — acá interesan ambos, para poder compararlos.
+- Grano: `(MACRO_REGION, NOMBRE_DEPARTAMENTO, NIVEL_GOBIERNO_NOMBRE,
+  ANO)`, 208 filas. Se agregó `NOMBRE_DEPARTAMENTO` al grano (no solo
+  `MACRO_REGION`) a propósito: con `MACRO_REGION` sola la tabla solo
+  serviría para un gráfico agregado (~48 filas), pero la pregunta
+  también pide un treemap por departamento — agregando por
+  departamento, Power BI puede sumar hacia macrorregión desde la misma
+  tabla, sin necesitar una segunda. Mismo principio que en Silver:
+  agregar solo hasta donde se está seguro de no necesitar más detalle.
+- Caso especial verificado: como `MACRO_REGION` se mantiene en el
+  `GROUP BY` junto con `NOMBRE_DEPARTAMENTO`, el departamento "LIMA" se
+  parte correctamente en sus 2 macrorregiones reales (Metropolitana y
+  Provincias) sin mezclar ni perder montos entre ellas — verificado
+  fila por fila contra el servidor.
+- Columnas: `MONTO_PIA`, `MONTO_PIM` y `MONTO_RECAUDADO` (los 3, a
+  diferencia de `AUTONOMIA_FISCAL` que solo necesitaba
+  `MONTO_RECAUDADO`) — la pregunta habla de "presupuesto y
+  recaudación", no de un ratio único. No se calculó ningún porcentaje
+  de participación en SQL: el "% del total" no tiene un único
+  significado fijo (¿del total nacional? ¿del año? ¿de Locales?),
+  mejor resuelto como medida en Power BI que congelado en la tabla.
+- `MACRO_REGION VARCHAR(30)` — ancho igual al de `gold.UBICACION` a
+  propósito (estaba en `VARCHAR(20)` en un primer intento; "Lima
+  Metropolitana" entra en 20, pero dejar anchos distintos para el mismo
+  dato en dos tablas es un riesgo de truncamiento si el valor cambia).
+- `JOIN` contra `gold.UBICACION` por `u.PREFIJO_UBIGEO =
+  LEFT(i.UBIGEO,4)` — no usa `gold.RUBRO` (no hace falta distinguir
+  rubros acá, solo geografía y nivel de gobierno).
+- Verificado: cobertura 100% del `JOIN` (ningún prefijo de `ingreso`
+  sin match en `gold.UBICACION`); `NIVEL_GOBIERNO_NOMBRE` solo trae
+  `GOBIERNOS LOCALES`/`GOBIERNOS REGIONALES`, nada más; `SUM(MONTO_
+  RECAUDADO)` de la tabla coincide exacto con `silver.ingreso`
+  (`S/ 249,372,977,616.34`, diferencia 0.00) — confirma que
+  `gold.UBICACION` funciona como pieza de unión sin perder filas.
+- Mismo patrón de `EXEC` al final del archivo que
+  `02_crear_autonomia_fiscal.sql` (ver arriba).
+
+### Construcción de Gold: contexto por nivel de gobierno (`gold.REPARTO_NIVEL_GOBIERNO`)
+- Objetivo: recuperar, solo como contexto (README + una tarjeta del
+  dashboard, NO se integra a ninguna tabla de hechos), el dato de qué
+  % del presupuesto/recaudación nacional maneja cada nivel de gobierno
+  (Nacional / Regional / Local) — dato que se pierde en el resto del
+  proyecto porque Silver excluye `GOBIERNO NACIONAL` a propósito
+  ("Filtro de niveles de gobierno", regla ya congelada).
+- **Única tabla Gold que lee Bronze directo, no Silver**: lee los
+  mismos 4 CSV crudos que `construir_ingreso.py`
+  (`Data/bronze/ingreso/*.csv`), pero **sin** aplicar el filtro que
+  excluye Nacional — a propósito, porque acá ese nivel es justo el
+  dato que se busca. No modifica ni llama a `construir_ingreso.py` ni
+  a `cargar_silver.py`, es un script independiente
+  (`Src/gold/cargar_reparto_nivel_gobierno.py`), para no arriesgar
+  tocar Silver por accidente.
+- **Python, no stored procedure** (excepción documentada al patrón
+  general de Gold): T-SQL no puede leer un `.csv` sin `BULK INSERT`/
+  `OPENROWSET`, que requiere permisos de sistema de archivos para la
+  cuenta del servicio de SQL Server — nunca configurados en este
+  proyecto, y no se justifican para una tabla de 12 filas de contexto.
+  Python + pandas ya sabe leer estos CSV (mismo patrón que toda Silver).
+- Grano: `(NIVEL_GOBIERNO_NOMBRE, ANO)`, 12 filas (3 niveles × 4 años,
+  verificado sin huecos). Columnas: `MONTO_PIM` y `MONTO_RECAUDADO`
+  (sin `MONTO_PIA`, no se pidió). Sin porcentaje guardado como columna
+  — mismo criterio que `REPARTO_TERRITORIAL`, el `%` se calcula al
+  vuelo (el script lo imprime, y también en Power BI).
+- Verificado: 12 filas exactas; chequeo de sentido — el
+  `SUM(MONTO_RECAUDADO)` de esta tabla es mayor que el de
+  `silver.ingreso` en los 4 años (acá sí incluye Nacional, ~2x más
+  grande); se confirmó que ninguna tabla existente (`silver.ingreso`,
+  `gold.UBICACION`, `gold.RUBRO`, `gold.AUTONOMIA_FISCAL`,
+  `gold.REPARTO_TERRITORIAL`) cambió de conteo ni de total.
+- **Hallazgo**: `MONTO_PIM` (presupuesto asignado) y `MONTO_RECAUDADO`
+  (ejecución real) cuentan historias distintas. En `MONTO_PIM`, Nacional
+  y Locales quedan bastante parejos (~41-45% cada uno, Regionales
+  ~14-17%). En `MONTO_RECAUDADO`, Nacional se despega más (hasta 49%
+  en 2022) y Locales baja (~37-40%) — consistente con que el recaudado
+  nacional incluye impuestos de base amplia y mejor tasa de cobro
+  (IGV, renta), no comparable con la recaudación municipal
+  (RDR/predial, más difícil de cobrar). Por este motivo se reportan
+  las dos tablas de porcentaje por separado, no una combinada — decidir
+  cuál usar en el README depende de si se quiere hablar de reparto de
+  responsabilidad de gasto (`MONTO_PIM`) o de capacidad de cobro real
+  (`MONTO_RECAUDADO`).
+
+### Construcción de Gold: cumplimiento predial (`gold.CUMPLIMIENTO_PREDIAL`)
+- Responde las preguntas 3 (¿quién cumple mejor la meta predial, Lima o
+  las regiones?) y 4 (¿el cumplimiento depende de la categoría MEF?) con
+  **una sola tabla** — comparten el mismo grano (municipalidad-año), es
+  "cumplimiento cortado de dos formas distintas", no dos tablas.
+- Grano: `(UBIGEO, ANO)`, 3,943 filas — igual a `silver.meta_predial`.
+  Verificado antes de construir: `UBIGEO + ANO_ESTADISTICA` ya es único
+  en `meta_predial` (0 combinaciones con más de un `SEC_EJEC`), así que
+  no hace falta agregar/`GROUP BY`, es un `SELECT` directo con columnas
+  calculadas — más simple que `AUTONOMIA_FISCAL` y
+  `REPARTO_TERRITORIAL`, que sí necesitaban agregar.
+- Es mayormente un **enriquecimiento**, no un cálculo nuevo: casi todo
+  ya estaba en Silver (`CUMPLIMIENTO_META_PREDIAL`, `CLASIFICACION`,
+  los flags). Lo que se agrega: `PREFIJO_UBIGEO` (para poder unir con
+  `gold.UBICACION` en Power BI y sacar macrorregión), `MON_RECAUDACTUAL_
+  TOTAL` (ordinaria + coactiva, precalculado), y
+  `BRECHA_EMISION_RECAUDACION` (emisión menos recaudado, **en soles**)
+  — un indicador derivado más tangible para un dashboard que un ratio
+  (ej. San Isidro: "S/ 72.8M emitidos y no cobrados" pega más que
+  "37% de cumplimiento").
+- Los flags (`FLAG_CUMPLIMIENTO_ATIPICO`, `FLAG_EMISION_SOSPECHOSA`) y
+  las filas con `CUMPLIMIENTO_META_PREDIAL = NULL` (denominador cero,
+  ~35% de las filas) se **arrastran tal cual desde Silver, sin filtrar
+  ni excluir** — mismo criterio de "reportar, no corregir" usado en
+  toda la capa Silver y en `FLAG_DENOMINADOR_NEGATIVO` de
+  `AUTONOMIA_FISCAL`. Que el dashboard decida qué hacer con ellas.
+- **Sin `JOIN` a `gold.UBICACION` en la carga** — decisión deliberada,
+  distinta a `REPARTO_TERRITORIAL`. La diferencia: `REPARTO_TERRITORIAL`
+  necesitaba columnas que solo existen en la dimensión (`MACRO_REGION`,
+  `NOMBRE_DEPARTAMENTO`), así que el `JOIN` era indispensable. Acá
+  `PREFIJO_UBIGEO` sale directo de `LEFT(UBIGEO,4)`, no se necesita
+  ninguna columna de la dimensión — unir solo para "validar" que exista
+  sería usar un `INNER JOIN` como filtro implícito silencioso, el mismo
+  patrón peligroso ya identificado con `gold.UBICACION` (ver más
+  arriba). En cambio, el procedimiento hace la verificación de
+  cobertura como **reporte**, no como filtro: un `PRINT` al final con
+  la cantidad de `PREFIJO_UBIGEO` que no encontrarían match en
+  `gold.UBICACION` (hoy da 0) — si algún día deja de dar 0, se nota en
+  el log de la carga, sin que ninguna fila se pierda calladita.
+- Verificado antes de construir: cobertura 100% —
+  ningún `UBIGEO` de `meta_predial` se queda sin `PREFIJO_UBIGEO` que
+  matchee en `gold.UBICACION`.
+- Verificado tras cargar: 3,943 filas (igual a Silver); 1,287 `NULL`
+  en `CUMPLIMIENTO_META_PREDIAL`, 58 `FLAG_CUMPLIMIENTO_ATIPICO`, 234
+  `FLAG_EMISION_SOSPECHOSA`, 8 `CLASIFICACION` nula — los 4 números
+  coinciden exacto con los ya conocidos de Silver; San Isidro 2024
+  coincide con los valores ya verificados en sesiones anteriores.
+- **Hallazgo P3 (cumplimiento por macrorregión)**: Lima Metropolitana
+  muy por delante del resto — 73.1% de cumplimiento promedio, contra
+  30.3%-40.6% en las demás 5 macrorregiones (bastante parejas entre
+  sí). Coherente con la autonomía fiscal ya vista (Lima Metropolitana
+  también lideraba ahí).
+- **Hallazgo P4 (cumplimiento por categoría MEF A-G)**: NO sigue el
+  patrón limpio A>B>C>D>E>F>G que se esperaba. La categoría **C**
+  tiene el mejor cumplimiento de las 7 (70.0% promedio, 72.9% mediana
+  — confirmado con ambas medidas, no es un sesgo de outliers en una
+  categoría chica de 165 municipios), por encima incluso de A (48.1%).
+  Sí hay una caída clara y consistente de D hacia abajo (45.1% → 30.9%
+  → 22.5% → 21.7% en promedio; la mediana de la categoría G es
+  directamente **0%** — más de la mitad de esos municipios no cobran
+  casi nada de lo emitido).
+- **Resuelto: por qué la categoría C rompe el patrón** — verificado
+  contra el servidor: `CLASIFICACION = 'C'` corresponde al **100%** a
+  `MACRO_REGION = 'Lima Metropolitana'` (168 de 168 filas, sin una sola
+  excepción; la cifra de 165 de la tabla de arriba es solo por el
+  filtro de atípicos/nulos de P4, no una discrepancia real). Es decir:
+  **P3 y P4 no son dos hallazgos independientes en el tramo alto** — el
+  "70% de la categoría C" y el "73.1% de Lima Metropolitana" son, en
+  gran medida, el mismo dato visto por dos caminos. La clasificación
+  del MEF no es una escala ordinal pura de tamaño; en el tramo alto se
+  mezcla con territorio, y el efecto categoría y el efecto geografía no
+  son separables ahí. Sí se verificó que el tramo bajo es distinto: las
+  categorías D, E, F y G están genuinamente dispersas por las 6
+  macrorregiones (ninguna concentrada en un solo territorio como pasa
+  con C — Lima Metropolitana ni siquiera aparece en E, F ni G), así que
+  el gradiente D→G sí es un hallazgo propio, no territorio disfrazado.
+- **Hipótesis del canon, probada y refutada (paradoja de Simpson)**: se
+  probó si la dependencia del canon explica peor cumplimiento predial
+  (hipótesis: municipios con mucho canon "cobran menos por costumbre").
+  Sin controlar por categoría, hay una diferencia agregada modesta
+  (~5.5 puntos). Pero al controlar por `CLASIFICACION` (comparar
+  "alta canon" vs. "baja canon" **dentro** de cada categoría, verificado
+  con `gold.AUTONOMIA_FISCAL` unida a `gold.CUMPLIMIENTO_PREDIAL` por
+  `UBIGEO`+`ANO`), el efecto **desaparece y hasta se invierte** según la
+  categoría (A y D: canon alto cumple peor; B y E: canon alto cumple
+  mejor; diferencias chicas en ambas direcciones). Conclusión: la
+  correlación agregada era un efecto de composición — los municipios
+  con mucho canon están sobrerrepresentados en las categorías chicas
+  (E/F/G), y es el tamaño del municipio el que arrastra el promedio
+  hacia abajo, no el canon en sí. **Hipótesis del canon descartada**;
+  el determinante real sigue siendo el tamaño/categoría del municipio,
+  no la fuente de sus ingresos.
+- **Dato cruzado con autonomía fiscal**: San Isidro tiene 0.97 de
+  autonomía fiscal (una de las más altas del país) pero solo 37% de
+  cumplimiento predial — incluso el distrito más autónomo deja gran
+  parte de lo emitido sin cobrar. Conecta directo con la pregunta 5
+  (potencial de recaudación desaprovechado).
+- **Valida la decisión de segmentación geográfica**: Lima Provincias
+  (36.3%) queda casi idéntica al resto del país (30-41%), muy lejos de
+  Lima Metropolitana (73.1%) — el mismo departamento, partido en dos,
+  con comportamientos completamente distintos. Confirma que la decisión
+  de separar Lima Metropolitana de Lima Provincias en la dimensión
+  geográfica (en vez de tratar "Lima" como una sola unidad) era
+  correcta: la brecha real es urbano-metropolitano vs. todo lo demás,
+  no "capital vs. provincias" — un promedio de "Lima" combinado habría
+  escondido esta diferencia.
+
+### Construcción de Gold: potencial de recaudación (`gold.POTENCIAL_RECAUDACION`)
+- Responde la pregunta 5, camino A (benchmark contra pares): comparar
+  cada municipalidad contra el desempeño de sus pares, no contra un
+  ideal absoluto.
+- **Par = misma `CLASIFICACION` (A-G) y mismo `ANO`** — no solo misma
+  categoría. Comparar contra una mediana/percentil mezclando los 4
+  años penalizaría injustamente a los años tempranos si el cumplimiento
+  general mejoró con el tiempo (cosa que ya sabíamos que pasa, ver
+  "Hallazgo analítico: denominador cero" más arriba). El
+  `PARTITION BY (CLASIFICACION, ANO)` en `PERCENTILE_CONT` refleja esto.
+- **Percentil 75, no mediana ni promedio**, como referencia del grupo
+  (`P75_CUMPLIMIENTO_GRUPO`, guardado como columna explícita, no solo
+  calculado y descartado — para que cualquiera pueda auditar contra qué
+  se comparó cada fila sin recalcular nada). Se descartó la mediana
+  porque en categorías con mediana 0% (como G) generaría potenciales
+  negativos sin sentido para casi todos los municipios del grupo — el
+  P75 representa "el mejor 25% de tus pares", más ambicioso y evita
+  ese caso degenerado (aunque no lo evita del todo, ver hallazgo de la
+  categoría G más abajo).
+- `POTENCIAL_NO_APROVECHADO = (P75_CUMPLIMIENTO_GRUPO × MON_EMISIONPREDIAL_AFECTO) − MON_RECAUDACTUAL_TOTAL`,
+  en soles, no en ratio — mismo criterio que `BRECHA_EMISION_RECAUDACION`
+  de `CUMPLIMIENTO_PREDIAL`. **No se fuerza a 0 cuando da negativo**: un
+  municipio que ya supera al mejor 25% de sus pares muestra un número
+  negativo real (información legítima, no se oculta).
+- `NULL` en `POTENCIAL_NO_APROVECHADO` cuando `MON_EMISIONPREDIAL_AFECTO
+  = 0` (no hay nada emitido, el concepto no aplica — multiplicar por
+  cero daría un número engañoso) o cuando `P75_CUMPLIMIENTO_GRUPO` es
+  `NULL` (grupo/año sin ningún dato limpio contra el cual comparar).
+  Los 8 registros con `CLASIFICACION NULL` quedan sin grupo de
+  referencia por diseño (`P75_CUMPLIMIENTO_GRUPO` forzado a `NULL` con
+  un `CASE`, para que no formen su propio "grupo de sin-categoría").
+- El percentil de referencia se calcula **solo con filas no atípicas**
+  (`FLAG_CUMPLIMIENTO_ATIPICO = 0`) — un caso corrupto tipo Sapallanga
+  no debe mover el percentil de nadie. `PERCENTILE_CONT` ignora los
+  `NULL` del grupo automáticamente (atípicos marcados + denominador
+  cero), sin necesidad de filtrarlos aparte con `WHERE`.
+- **`FLAG_GRUPO_SIN_REFERENCIA`** (`P75_CUMPLIMIENTO_GRUPO IS NULL OR
+  P75_CUMPLIMIENTO_GRUPO = 0`): se agregó después de encontrar que,
+  para la categoría G, el cambio de mediana a P75 **no evitaba del
+  todo** el problema que buscaba evitar (ver hallazgo abajo) — se marca
+  en vez de excluir la fila o de ocultar el número, mismo criterio de
+  "reportar, no corregir" que el resto del proyecto. 670 de 3,943 filas
+  quedan marcadas.
+- **Hallazgo, categoría G — el más duro del proyecto hasta ahora**: en
+  2022, el **100%** de los 143 municipios de categoría G no emitió
+  predial (`CUMPLIMIENTO_META_PREDIAL` nulo en todos, de ahí que
+  `P75_CUMPLIMIENTO_GRUPO` sea `NULL` ese año — no hay ni un dato limpio
+  para calcular nada). En 2024, de los 98 municipios G con dato limpio,
+  **75 (77%) tienen `CUMPLIMIENTO_META_PREDIAL` exactamente 0** — por
+  eso el propio percentil 75 también da 0, no es un artefacto del
+  estadístico elegido, es que ni el mejor 25% de sus pares cobra algo.
+  Para estos municipios, la pregunta 5 ("¿cuánto más podrían cobrar?")
+  no tiene respuesta significativa — la pregunta real es "¿por qué no
+  existe una administración tributaria funcionando?", que conecta
+  directo con la pregunta 6 (cruce con estructura municipal de RENAMU:
+  `P32`, personal, instrumentos de gestión).
+- **Resultado principal**: si cada municipalidad cobrara como el mejor
+  25% de sus pares de su misma categoría y año, el Perú recaudaría en
+  promedio **S/ 464,409,927.92 más al año** en impuesto predial
+  (S/ 1,857,639,711.67 acumulados 2022-2025) — calculado sumando solo
+  las brechas positivas, excluyendo filas `FLAG_GRUPO_SIN_REFERENCIA`
+  y `FLAG_CUMPLIMIENTO_ATIPICO`. El mayor potencial individual es San
+  Isidro 2025 (S/ 57.1M) — el resto del top 10 son casi todos otros
+  distritos de Lima Metropolitana, coherente con ser los que más
+  emiten en soles absolutos aunque no sean los peores en % relativo.
+
+### Construcción de Gold: estructura municipal (`gold.ESTRUCTURA_MUNICIPAL`)
+- Responde la pregunta 6, la última del proyecto: ¿qué tienen en común
+  las municipalidades que recaudan mejor? Cruce entre estructura
+  (RENAMU: personal, área tributaria, instrumentos de gestión) y
+  cumplimiento predial (`meta_predial`).
+- **`LEFT JOIN` desde `silver.renamu`, no `INNER`**: RENAMU cubre
+  ~1,890 municipios/año, `meta_predial` solo ~1,000 — un `INNER JOIN`
+  descartaría justo a los municipios que nunca reportan al MEF, que son
+  los más relevantes para "¿por qué no cobran?". Con `LEFT JOIN` se
+  conservan las 7,547 filas de RENAMU completas, con `CLASIFICACION`/
+  `CUMPLIMIENTO_META_PREDIAL` en `NULL` cuando no hay match.
+- `TIENE_DATO_PREDIAL` (bandera de si hubo match en `meta_predial`, sin
+  importar si `CUMPLIMIENTO_META_PREDIAL` en sí dio `NULL` por
+  denominador cero) — distingue "nunca reportó al MEF" de "reportó pero
+  no cobró nada", dos historias distintas que se confirmó que sí tienen
+  perfiles diferentes (ver hallazgo abajo).
+- **Conteo de instrumentos de gestión sobre 15 columnas, no 16**:
+  `P23_4` (Acondicionamiento Territorial de Nivel Provincial) se
+  excluye del conteo — verificado contra el diccionario oficial de
+  RENAMU ("Sólo Municipalidad Provincial") y contra los datos
+  (`Tipomuni=1` siempre responde esa pregunta, `Tipomuni=2` siempre la
+  deja en blanco, 100% limpio) — no es un dato faltante, es que la
+  pregunta no aplica a distritos. Contarla igual para todos habría
+  penalizado injustamente al 90% de las municipalidades (las
+  distritales) por algo que no les corresponde tener.
+- **`1 = Sí` confirmado contra el diccionario real** (no asumido) para
+  `P23_*` y `P32`. Excepción importante para no repetir en otra parte
+  del proyecto: **`P17_8` (catastro digital) usa una convención
+  distinta** — `0 = No`, `8 = Sí` (el valor "Sí" es el número de la
+  pregunta, no `1`). Se guardó tal cual viene en `TIENE_CATASTRO_
+  DIGITAL`, sin reinterpretar — cualquier consulta futura sobre esa
+  columna tiene que usar `= '8'`, no `= '1'`.
+- **Desfase temporal documentado, no corregido**: `P32_1_T` (personal
+  del área tributaria) y `PCT_PERSONAL_NOMBRADO` miden personal al 31
+  de diciembre del **año anterior** al de la encuesta RENAMU (regla de
+  la propia encuesta, confirmado en el diccionario). Es decir, la fila
+  con `ANO=2024` describe estructura de personal de 2023. Es
+  intencional y hasta conviene para este análisis (la estructura
+  instalada precede al resultado de cobranza), pero quien compare
+  "estructura vs. cumplimiento del mismo `ANO`" está en realidad
+  comparando estructura de un año contra cobranza del siguiente.
+- `PCT_PERSONAL_TRIBUTARIO = PERSONAL_AREA_TRIBUTARIA / PERSONAL_TOTAL`
+  — variable derivada para normalizar por tamaño de municipio (2
+  personas de 200 empleados no es lo mismo que 2 de 20).
+- `FLAG_CUMPLIMIENTO_ATIPICO` se arrastra de `meta_predial` — **crítico
+  para esta tabla**: sin excluirlo, los 58 casos atípicos (tipo
+  Sapallanga) inflan los promedios de categorías chicas hasta valores
+  imposibles (se detectó un promedio de 8.66 en una prueba inicial,
+  matemáticamente imposible dado que el máximo real es 0.99 — el bug
+  fue no incluir esta bandera en la tabla desde el diseño original).
+- **Hallazgo 1 (grupos de cobranza)**: los municipios que **nunca
+  reportan al MEF** tienen mucha menos área tributaria (43.6%) que
+  cualquier otro grupo (76-93% en el resto) — coherente con "no existe
+  administración funcionando". Pero entre "cobranza baja" y "cobranza
+  aceptable" el `%` con área es casi idéntico (93.2% vs. 92.0%); lo que
+  sí difiere fuerte es el personal dentro del área (9.75 vs. 24.67,
+  casi el triple) — la existencia formal del área no distingue, el
+  tamaño real sí parece importar en este corte sin controlar.
+- **Hallazgo 2, tercera hipótesis estructural refutada**: al controlar
+  por `CLASIFICACION` (mismo método que con el canon), **ni tener área
+  tributaria (sí/no), ni el personal absoluto del área, ni la
+  proporción de personal tributario** sostienen una relación limpia y
+  consistente con el cumplimiento. En las categorías con muestras
+  grandes y confiables (E, F, G), más personal en el área correlaciona
+  con cumplimiento **igual o peor**, no mejor (ej. categoría E: 35.3%
+  sin área → 27.4% con área de 5+ personas). Solo categoría B muestra
+  una tendencia positiva débil. No se sobrevende esta variable como
+  explicación — mismo criterio que con el canon: se prueba, no se
+  sostiene, se documenta el resultado real, no el esperado.
+- **Conclusión acumulada de las preguntas 4-6**: de tres hipótesis
+  estructurales probadas con controles apropiados (dependencia del
+  canon, existencia de área tributaria, tamaño/proporción de esa área),
+  **ninguna sobrevive** de forma limpia. El único patrón robusto en
+  todo el proyecto sigue siendo el tamaño/categoría MEF del municipio
+  — que en el tramo alto se confunde con geografía (categoría C =
+  Lima Metropolitana) y en el tramo bajo (D-G) es un efecto genuino y
+  disperso geográficamente. Las variables estructurales medidas hasta
+  ahora (personal, área, instrumentos) no explican, por sí solas, la
+  diferencia en cumplimiento dentro de un mismo grupo de tamaño.
 
 ### Segmentación geográfica
 - Una sola columna con: Lima Metropolitana / Lima Provincias / Norte /
@@ -535,6 +927,13 @@ Cargar (o recargar) los 3 Parquet de Silver a SQL Server — vacía las 3
 tablas y las vuelve a llenar, se puede correr las veces que haga falta:
 ```
 python Src/gold/cargar_silver.py
+```
+
+Cargar (o recargar) la tabla de contexto por nivel de gobierno — antes,
+correr una vez `SQL/gold/04_crear_reparto_nivel_gobierno.sql` para crear
+la tabla:
+```
+python Src/gold/cargar_reparto_nivel_gobierno.py
 ```
 
 Por ahora no hay tests, lint ni build configurados en el repo.
@@ -640,7 +1039,49 @@ Tres scripts en `Src/silver/`, uno por fuente, mismo estilo procedural
   + `CREATE OR ALTER PROCEDURE gold.sp_cargar_autonomia_fiscal` — el
   procedimiento trunca la tabla y la recarga agregando `silver.ingreso`
   (filtrado a Gobiernos Locales) por `UBIGEO`/año, usando las banderas
-  de `gold.RUBRO` para los componentes y el ratio de autonomía.
+  de `gold.RUBRO` para los componentes y el ratio de autonomía. Termina
+  con `EXEC gold.sp_cargar_autonomia_fiscal;` como tercer batch, para
+  que el archivo cree y cargue la tabla en una sola corrida.
+- `03_crear_reparto_territorial.sql`: `CREATE TABLE
+  gold.REPARTO_TERRITORIAL` + `CREATE OR ALTER PROCEDURE
+  gold.sp_cargar_reparto_territorial` — agrega `silver.ingreso` (sin
+  filtrar nivel de gobierno) por macrorregión + departamento + nivel de
+  gobierno + año, uniendo contra `gold.UBICACION`. Mismo patrón de
+  `EXEC` final que el archivo anterior.
+- `04_crear_reparto_nivel_gobierno.sql`: solo la estructura de
+  `CREATE TABLE gold.REPARTO_NIVEL_GOBIERNO` — sin procedimiento, la
+  carga la hace Python (ver siguiente punto).
+- `05_crear_cumplimiento_predial.sql`: `CREATE TABLE
+  gold.CUMPLIMIENTO_PREDIAL` + `CREATE OR ALTER PROCEDURE
+  gold.sp_cargar_cumplimiento_predial` — `SELECT` directo desde
+  `silver.meta_predial` (sin `JOIN`, sin agregar, ver justificación
+  arriba), con un `PRINT` de reporte al final que cuenta cuántos
+  `PREFIJO_UBIGEO` no encontrarían match en `gold.UBICACION` (no filtra
+  nada, solo avisa). Mismo patrón de `EXEC` final que los anteriores.
+- `06_crear_potencial_recaudacion.sql`: `CREATE TABLE
+  gold.POTENCIAL_RECAUDACION` + `CREATE OR ALTER PROCEDURE
+  gold.sp_cargar_potencial_recaudacion` — dos CTE encadenados: uno
+  arma la base desde `gold.CUMPLIMIENTO_PREDIAL` (con el cumplimiento
+  "limpio" para referencia, excluyendo atípicos), el otro calcula
+  `PERCENTILE_CONT(0.75) WITHIN GROUP (...) OVER (PARTITION BY
+  CLASIFICACION, ANO)` para el percentil de cada par (categoría, año) y
+  lo pega a cada fila. Mismo patrón de `EXEC` final que los anteriores.
+- `07_crear_estructura_municipal.sql`: `CREATE TABLE
+  gold.ESTRUCTURA_MUNICIPAL` + `CREATE OR ALTER PROCEDURE
+  gold.sp_cargar_estructura_municipal` — `LEFT JOIN` desde
+  `silver.renamu` hacia `silver.meta_predial` por `UBIGEO+ANO` (ver
+  justificación arriba), con el conteo de 15 instrumentos de gestión
+  armado a mano (suma de 15 `CASE WHEN P23_N = '1'`, sin despivotar).
+  Última tabla Gold del proyecto — cierra las 6 preguntas.
+
+`Src/gold/cargar_reparto_nivel_gobierno.py` es la única excepción al
+patrón "Gold = SQL Server": lee Bronze directo con pandas (no Silver,
+no SQL), agrega por nivel de gobierno y año, y carga el resultado (12
+filas) a `gold.REPARTO_NIVEL_GOBIERNO` reutilizando
+`Src/gold/conexion.py`. Es un script independiente — no importa ni
+llama a `construir_ingreso.py` ni a `cargar_silver.py`. Ver "Reglas de
+negocio (CONGELADAS)" arriba para la justificación completa de por qué
+Python y no un stored procedure acá.
 
 Las transformaciones Gold que faltan (cumplimiento predial Lima vs.
 regiones, benchmark contra pares, cruce estructura municipal /
