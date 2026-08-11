@@ -225,7 +225,7 @@ usa el título solo para desempatar cuando dos registros compiten, nunca
 como filtro.
 
 Todas las decisiones de tratamiento están documentadas con su
-justificación en [`docs/reglas-de-negocio.md`](docs/reglas-de-negocio.md).
+justificación en [`Docs/reglas-de-negocio.md`](Docs/reglas-de-negocio.md).
 
 ## Cómo ejecutar el proyecto
 
