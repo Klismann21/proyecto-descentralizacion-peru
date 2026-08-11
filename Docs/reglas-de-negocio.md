@@ -905,6 +905,35 @@ y necesito entender el porqué, no solo el código.
 - Una sola columna con: Lima Metropolitana / Lima Provincias / Norte /
   Centro / Sur / Oriente. Cada departamento cae en exactamente una.
 
+### Lecciones aprendidas (qué se haría distinto empezando de nuevo)
+- **Llave de `gold.RUBRO` por nombre, no por código**: el `JOIN` entre
+  `silver.ingreso` y `gold.RUBRO` compara `RUBRO_NOMBRE` (texto). Funciona
+  hoy (cobertura verificada al 100%), pero es una llave frágil — un
+  cambio de redacción del MEF en un año futuro (ya pasó con
+  `FORMULARIO_ID` en meta_predial) haría caer ese rubro del `JOIN` en
+  silencio. Mejor: preservar o generar en Silver un código estable de
+  rubro y usarlo como llave; el nombre debería ser solo un atributo
+  descriptivo de la dimensión.
+- **Grano decidido antes de escribir el `CREATE TABLE`, no durante**: el
+  bug de `gold.UBICACION` (ver esa sección) no fue un error de sintaxis,
+  fue no responder "¿una fila por departamento o por provincia?" antes de
+  diseñar la tabla. Un grano mal definido se propaga como un número
+  "razonable pero incorrecto" — el tipo de error más difícil de detectar,
+  porque no rompe nada, solo da mal el resultado.
+- **Diccionario de datos leído antes de escribir la transformación, no
+  después de que algo falle**: los casos de `P23_4` y `P17_8` (ver
+  "Construcción de Silver de RENAMU") se resolvieron bien, pero de forma
+  reactiva — un resultado raro llevó a revisar el diccionario recién en
+  ese momento, cuando ya estaba disponible desde el principio. Leerlo
+  completo antes de la primera línea de transformación evita escribir una
+  versión con el supuesto equivocado para corregirla después.
+- **Convención de "marcar con flag, no corregir en silencio" declarada
+  desde el día uno**: terminó siendo uno de los criterios más
+  consistentes del proyecto (`FLAG_CUMPLIMIENTO_ATIPICO`,
+  `FLAG_EMISION_SOSPECHOSA`, `FLAG_DENOMINADOR_NEGATIVO`,
+  `FLAG_GRUPO_SIN_REFERENCIA`), pero se adoptó caso por caso en vez de
+  fijarse una sola vez como regla general al inicio del proyecto.
+
 ## Comandos
 
 Instalar dependencias:
