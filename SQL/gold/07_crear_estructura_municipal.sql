@@ -24,7 +24,9 @@ CREATE TABLE gold.ESTRUCTURA_MUNICIPAL (
     TIENE_DATO_PREDIAL               BIT           NOT NULL,
     CLASIFICACION                    VARCHAR(1)    NULL,
     CUMPLIMIENTO_META_PREDIAL        FLOAT         NULL,
+    PCT_CANON                        FLOAT         NULL,
     FLAG_CUMPLIMIENTO_ATIPICO        BIT           NOT NULL,
+    FLAG_PERSONAL_INCONSISTENTE      BIT           NOT NULL,
     CONSTRAINT PK_estructura_municipal PRIMARY KEY (UBIGEO, ANO)
 );
 
@@ -40,7 +42,8 @@ BEGIN
         TIENE_AREA_TRIBUTARIA, PERSONAL_AREA_TRIBUTARIA, PERSONAL_TOTAL,
         PCT_PERSONAL_TRIBUTARIO, PCT_PERSONAL_NOMBRADO,
         TIENE_CATASTRO_DIGITAL, CANTIDAD_INSTRUMENTOS_GESTION,
-        TIENE_DATO_PREDIAL, CLASIFICACION, CUMPLIMIENTO_META_PREDIAL, FLAG_CUMPLIMIENTO_ATIPICO
+        TIENE_DATO_PREDIAL, CLASIFICACION, CUMPLIMIENTO_META_PREDIAL, PCT_CANON,
+        FLAG_CUMPLIMIENTO_ATIPICO, FLAG_PERSONAL_INCONSISTENTE
     )
     SELECT
         r.UBIGEO,
@@ -75,10 +78,29 @@ BEGIN
         CASE WHEN m.UBIGEO IS NOT NULL THEN 1 ELSE 0 END AS TIENE_DATO_PREDIAL,
         m.CLASIFICACION,
         m.CUMPLIMIENTO_META_PREDIAL,
-        ISNULL(m.FLAG_CUMPLIMIENTO_ATIPICO, 0) AS FLAG_CUMPLIMIENTO_ATIPICO
+        -- Canon sobre el total sin deuda, tomado de gold.AUTONOMIA_FISCAL
+        -- (no se recalcula) por UBIGEO+ANO. NULL si no hay match (esa
+        -- muni no es Gobierno Local, o no tiene fila en ese año) -- el
+        -- LEFT JOIN deja a.MONTO_CANON en NULL y la division se propaga
+        -- sola. Tambien NULL cuando FLAG_DENOMINADOR_NEGATIVO = 1 (caso
+        -- Incahuasi): un denominador que no tiene sentido de negocio
+        -- (reversion contable de canon en SIAF) produce un ratio que
+        -- tampoco lo tiene -- mismo criterio de fondo que
+        -- RATIO_AUTONOMIA en AUTONOMIA_FISCAL.
+        CASE WHEN a.FLAG_DENOMINADOR_NEGATIVO = 1 THEN NULL
+             ELSE CAST(a.MONTO_CANON AS FLOAT) / NULLIF(a.MONTO_TOTAL_SIN_DEUDA, 0)
+        END AS PCT_CANON,
+        ISNULL(m.FLAG_CUMPLIMIENTO_ATIPICO, 0) AS FLAG_CUMPLIMIENTO_ATIPICO,
+        -- Violacion de subconjunto: el personal del area tributaria no
+        -- puede ser mayor al personal total (RENAMU auto-reportado, no
+        -- se corrige el dato, solo se marca). NULL en cualquiera de los
+        -- dos lados nunca dispara el CASE, queda en 0 por diseño.
+        CASE WHEN r.P32_1_T > r.P19D_T THEN 1 ELSE 0 END AS FLAG_PERSONAL_INCONSISTENTE
     FROM silver.renamu r
     LEFT JOIN silver.meta_predial m
-        ON m.UBIGEO = r.UBIGEO AND m.ANO_ESTADISTICA = r.ANO;
+        ON m.UBIGEO = r.UBIGEO AND m.ANO_ESTADISTICA = r.ANO
+    LEFT JOIN gold.AUTONOMIA_FISCAL a
+        ON a.UBIGEO = r.UBIGEO AND a.ANO = r.ANO;
 
     PRINT 'Filas insertadas: ' + CAST(@@ROWCOUNT AS VARCHAR);
 END;

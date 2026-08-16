@@ -48,6 +48,13 @@ una traducida en un dashboard de decisión:
    Cruce entre estructura municipal (personal, instrumentos de gestión,
    área de administración tributaria) y cumplimiento de la meta predial.
 
+## Alcance
+
+Este proyecto mide la descentralización desde su dimensión
+**fiscal-administrativa**: la capacidad de las municipalidades para generar
+y gestionar sus propios recursos. No aborda la dimensión política de la
+descentralización, que requiere fuentes distintas.
+
 ## Hallazgos
 
 **El Perú descentralizó el gasto, no la recaudación.** Los gobiernos
@@ -66,8 +73,8 @@ gobiernos locales de Lima Metropolitana el canon representa apenas el 8%.
 
 **La brecha no es capital contra provincias, es metropolitano contra todo
 lo demás.** Lima Metropolitana tiene una mediana de cumplimiento predial
-de 74%. Lima Provincias —el mismo departamento— cae a 25%, por debajo del
-Norte (28%) y del Oriente (34%). Separar ambas realidades fue una decisión
+de 74%. Lima Provincias —el mismo departamento— cae a 27%, por debajo del
+Norte (30%) y del Oriente (35%). Separar ambas realidades fue una decisión
 de diseño temprana del proyecto; los datos la confirmaron.
 
 **En el tramo bajo, la administración tributaria simplemente no existe.**
@@ -75,10 +82,25 @@ En 2022, ninguno de los 143 municipios de categoría G emitió impuesto
 predial. En 2024, de los 98 que sí emitieron, 74 (75%) no cobraron ni un
 sol de lo emitido. La mediana de cumplimiento de esa categoría es 0%.
 
-**S/ 464 millones al año quedan sin cobrar.** Si cada municipalidad
+**S/ 454 millones al año quedan sin cobrar.** Si cada municipalidad
 alcanzara el cumplimiento del mejor 25% de sus pares —no un ideal
 teórico, sino lo que municipios comparables ya logran— la recaudación
-predial del país crecería en ese monto anual.
+predial del país crecería en ese monto anual. La cifra baja de una
+primera estimación de S/ 464 millones tras excluir también los casos de
+emisión implausible detectados en el diagnóstico de calidad de datos. El
+mayor caso individual es San Isidro en 2025, con S/ 57.1M en un solo
+año.
+
+**El cumplimiento se desplomó justo cuando más municipios empezaron a
+reportar.** Entre 2022 y 2025, la proporción de municipios que emiten
+impuesto predial subió de 55% a 76%. Pero el cumplimiento agregado
+nacional cayó de 70.6% en 2023 a 51.2% en 2024, y no se recuperó del
+todo en 2025. La causa no es que los municipios dejaran de cobrar: es
+que 259 municipios reportaron emisión sin registrar ni un sol de
+recaudación en 2024, contra solo 35 el año anterior. Los datos
+disponibles no permiten distinguir una caída real de cobranza de un
+cambio en el registro del MEF —los indicadores de cumplimiento de 2024
+y 2025 deben leerse con esa salvedad.
 
 ### Tres hipótesis que los datos no sostuvieron
 
@@ -105,12 +127,47 @@ variable que predice el desempeño de forma robusta y consistente. Las
 variables de estructura interna disponibles no agregan poder explicativo
 una vez controlado ese factor.
 
-## Alcance
+## Dashboards
 
-Este proyecto mide la descentralización desde su dimensión
-**fiscal-administrativa**: la capacidad de las municipalidades para generar
-y gestionar sus propios recursos. No aborda la dimensión política de la
-descentralización, que requiere fuentes distintas.
+Cinco páginas en Power BI, cada una respondiendo una de las preguntas del
+proyecto. El archivo completo está en
+[`Power BI/Dashboard Final.pbix`](<Power BI/Dashboard Final.pbix>).
+
+### 1. Panorama
+![Panorama general](Docs/imagenes/01-panorama.png)
+Vista general: presupuesto por nivel de gobierno, autonomía fiscal
+mediana, potencial de recaudación sin cobrar, recaudación por
+macrorregión y su distribución en el mapa del país.
+
+### 2. Autonomía fiscal municipal
+![Autonomía fiscal municipal](Docs/imagenes/02-autonomia.png)
+Cuánto recibe cada macrorregión frente a cuánto genera por sí misma, la
+composición del ingreso (recursos propios, transferencias, canon,
+deuda), y los departamentos más y menos autónomos del país.
+
+### 3. Cumplimiento del impuesto predial
+![Cumplimiento del impuesto predial](Docs/imagenes/03-cumplimiento-predial.png)
+Cumplimiento mediano nacional, la brecha entre lo emitido y lo cobrado,
+el cumplimiento por macrorregión y por categoría MEF, y la evolución
+2022-2025 que muestra el quiebre de 2024.
+
+### 4. Potencial de recaudación
+![Potencial de recaudación](Docs/imagenes/04-potencial.png)
+Cuánto más podría recaudar cada municipalidad si igualara a sus pares,
+los diez casos con mayor brecha en soles, y por qué el problema tiene
+una cara distinta en Lima que en el resto del país.
+
+> Nota: el "S/ 57.1M" de San Isidro citado en Hallazgos es la brecha de
+> un solo año (2025) contra el percentil 75 de su categoría. El ranking
+> de este dashboard acumula los cuatro años por municipio, por eso ahí
+> San Isidro aparece con S/ 152.5M — son dos cortes distintos del mismo
+> dato, no una inconsistencia.
+
+### 5. ¿Qué explica el desempeño?
+![Qué explica el desempeño](Docs/imagenes/05-hipotesis.png)
+Las tres hipótesis puestas a prueba (canon, área tributaria, personal) y
+por qué ninguna predice el cumplimiento tan bien como la categoría del
+municipio.
 
 ## Los datos
 
@@ -275,15 +332,21 @@ anteriores, que descargan directamente desde las fuentes oficiales.
 ```
 ├── Src/
 │   ├── ingesta/          # Descarga de fuentes → Bronze
-│   └── silver/           # Limpieza y validación → Silver
+│   ├── silver/           # Limpieza y validación → Silver
+│   └── gold/             # Carga a SQL Server y conexión
 ├── SQL/                  # Transformaciones Silver → Gold
 ├── Data/
 │   ├── bronze/           # Archivos crudos (no versionado)
-│   ├── silver/           # Parquet limpios (no versionado)
-│   └── gold/             # Tablas analíticas
+│   └── silver/           # Parquet limpios (no versionado)
 ├── Docs/
 │   ├── diccionarios/     # Diccionarios de datos de las fuentes
-│   └── reglas-de-negocio.md
-├── Power BI/             # Dashboards
+│   ├── imagenes/         # Capturas de los dashboards
+│   ├── reglas-de-negocio.md
+│   └── diagnostico-calidad-gold.md
+├── Power BI/             # Dashboard (.pbix)
 └── README.md
 ```
+
+No hay carpeta `Data/gold/`: la capa Gold no se guarda en archivos, vive
+directamente en SQL Server (base `GoldFiscal`, esquema `gold`) — ver
+"Arquitectura" más arriba.

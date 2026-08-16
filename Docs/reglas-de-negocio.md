@@ -93,6 +93,12 @@ sección "Reglas de negocio (CONGELADAS)" más abajo.
   del canon y el área tributaria binaria) — el hallazgo robusto sigue
   siendo el tamaño/categoría del municipio, no ninguna variable
   estructural individual medida hasta ahora.
+- Antes de conectar Power BI se corrió un diagnóstico sistemático de
+  calidad de datos sobre las 6 tablas de Gold (ver
+  `Docs/diagnostico-calidad-gold.md`) — de ahí salieron dos flags nuevos,
+  `FLAG_EMISION_ATIPICA_ALTA` y `FLAG_PERSONAL_INCONSISTENTE` (ver
+  subsecciones de `CUMPLIMIENTO_PREDIAL`/`POTENCIAL_RECAUDACION` y
+  `ESTRUCTURA_MUNICIPAL` más abajo).
 - Siguiente paso: conectar Power BI a las tablas Gold — la
   construcción de datos del proyecto está completa.
 
@@ -263,6 +269,29 @@ y necesito entender el porqué, no solo el código.
     identificó el patrón.
   - Sigue sin corregirse ni descartarse en Silver: se documenta acá como
     contexto para cuando se use CUMPLIMIENTO_META_PREDIAL en Gold.
+
+### ⚠️ Salvedad obligatoria: quiebre de recaudación 2024-2025 (no confundir con el punto anterior)
+- Distinto del denominador-cero de arriba (que es del lado de la
+  **emisión**): acá el municipio sí emitió (`MON_EMISIONPREDIAL_AFECTO
+  > 0`) pero su recaudación total registrada es **exactamente cero**.
+  El número de municipios en esta situación pasa de 35 (2023) a 259
+  (2024) y 262 (2025) — 7.4x — mientras el grupo que sí reporta
+  cobranza cae de 637 a 482. Investigado a fondo (panel balanceado de
+  830 municipios presentes los 4 años, y exclusión de filas con flags
+  de atipicidad): **no es composición ni datos corruptos**, es un
+  quiebre real en el patrón de reporte. Investigación completa en
+  `Docs/diagnostico-calidad-gold.md` ("Quiebre de recaudación 2024").
+- **Los datos NO permiten distinguir entre una caída real de cobranza y
+  un cambio en el registro/reporte del MEF** — ambos escenarios
+  producen la misma huella (emisión positiva, recaudación en cero), y
+  no hay ninguna columna que marque "no reportó" distinto de "reportó
+  cero". Cualquier indicador de cumplimiento predial 2024-2025 (el
+  agregado nacional cae de 70.7% a 51.0%) debe leerse con esta
+  salvedad, no como un hallazgo definitivo de "los municipios dejaron
+  de cobrar".
+- Se agregó `FLAG_SIN_REPORTE_RECAUDACION` a `gold.CUMPLIMIENTO_PREDIAL`
+  (marca, no corrige — mismo criterio que el resto de los flags de esta
+  tabla) para poder excluir o resaltar estos casos desde Power BI.
 
 ### Flags de outliers en meta_predial (se marcan, no se borran)
 - FLAG_CUMPLIMIENTO_ATIPICO = CUMPLIMIENTO_META_PREDIAL > 2.0 (False en
@@ -695,6 +724,36 @@ y necesito entender el porqué, no solo el código.
   `FLAG_EMISION_SOSPECHOSA`, 8 `CLASIFICACION` nula — los 4 números
   coinciden exacto con los ya conocidos de Silver; San Isidro 2024
   coincide con los valores ya verificados en sesiones anteriores.
+- **`MUNICIPALIDAD_NOMBRE`** (agregado después, para Power BI): a
+  diferencia de `POTENCIAL_RECAUDACION`, acá no hace falta un `JOIN`
+  aparte — el procedimiento ya lee directo `FROM silver.meta_predial m`,
+  así que `m.MUNICIPALIDAD_NOMBRE` está disponible en el mismo `SELECT`.
+  Verificado tras recargar: las 3,943 filas se mantuvieron igual y
+  ninguna quedó con el nombre en `NULL`.
+- **`FLAG_EMISION_ATIPICA_ALTA`** (agregado tras el diagnóstico de
+  calidad de datos de la capa Gold, ver
+  `Docs/diagnostico-calidad-gold.md`): `FLAG_EMISION_SOSPECHOSA` solo
+  detecta emisión **baja** (0-10,000); no había ningún chequeo para
+  emisión anormalmente **alta** — el caso que había pasado
+  desapercibido con Jayanca (emisión de S/203.7M, 184x su año anterior,
+  cumplimiento de 0.00058%, sin ningún flag activo). Se calcula
+  comparando cada fila contra la **mediana propia del municipio** (entre
+  sus años con emisión > 0, con `PERCENTILE_CONT(0.5)` particionado por
+  `UBIGEO`) — no contra un umbral fijo en soles, que no serviría igual
+  para una capital que para un distrito chico, ni contra el año
+  anterior solamente, que es más sensible a ruido de un solo punto.
+  Umbral elegido: **>20x** la mediana propia, tras comparar 20x/50x/100x
+  contra el servidor real (20x y 50x daban el mismo resultado, 100x no
+  marcaba ninguna fila real). Verificado: 4 filas marcadas — Recuay
+  2024, Jayanca 2024, San Antonio 2023, Ayaviri 2022 — ninguna tenía
+  `FLAG_CUMPLIMIENTO_ATIPICO` activo para ese año específico.
+- **Caso límite verificado, deliberadamente sin marcar**: Chilca, Cañete
+  (150505 — uno de los homónimos de `MUNICIPIO_ETIQUETA`) sube de
+  S/35.2M a S/85.5M entre 2023 y 2024, 2.4x su propia mediana, muy por
+  debajo de 20x — no se activa el flag, y es correcto: un salto de 2.4x
+  no está en el rango de implausibilidad que motivó el flag (los 4 casos
+  marcados van de 53x a 85x). Queda como ejemplo explícito de que el
+  diseño no captura cualquier salto grande, solo los extremos.
 - **Hallazgo P3 (cumplimiento por macrorregión)**: Lima Metropolitana
   muy por delante del resto — 73.1% de cumplimiento promedio, contra
   30.3%-40.6% en las demás 5 macrorregiones (bastante parejas entre
@@ -820,6 +879,20 @@ y necesito entender el porqué, no solo el código.
   Isidro 2025 (S/ 57.1M) — el resto del top 10 son casi todos otros
   distritos de Lima Metropolitana, coherente con ser los que más
   emiten en soles absolutos aunque no sean los peores en % relativo.
+- **`MUNICIPALIDAD_NOMBRE`** (agregado después, para Power BI): el
+  `SELECT` del procedure parte de `gold.CUMPLIMIENTO_PREDIAL`, que no
+  tiene esta columna — se trae con un `LEFT JOIN` aparte a
+  `silver.meta_predial` por `(UBIGEO, ANO_ESTADISTICA)`, la misma
+  combinación que ya funciona como llave única en esa tabla (es la
+  misma que usa `gold.CUMPLIMIENTO_PREDIAL` como PK). Verificado: las
+  3,943 filas se mantuvieron igual tras el cambio, y ninguna quedó con
+  el nombre en `NULL`.
+- **`FLAG_EMISION_ATIPICA_ALTA`** (mismo diagnóstico de calidad de datos
+  que en `CUMPLIMIENTO_PREDIAL` — ver esa sección más arriba y
+  `Docs/diagnostico-calidad-gold.md`): no se recalcula acá, se hereda
+  directo de `gold.CUMPLIMIENTO_PREDIAL` dentro del CTE `BASE`, mismo
+  criterio que ya se usaba con `FLAG_CUMPLIMIENTO_ATIPICO`. Verificado:
+  4 filas marcadas, las mismas que en `CUMPLIMIENTO_PREDIAL`.
 
 ### Construcción de Gold: estructura municipal (`gold.ESTRUCTURA_MUNICIPAL`)
 - Responde la pregunta 6, la última del proyecto: ¿qué tienen en común
@@ -865,6 +938,38 @@ y necesito entender el porqué, no solo el código.
 - `PCT_PERSONAL_TRIBUTARIO = PERSONAL_AREA_TRIBUTARIA / PERSONAL_TOTAL`
   — variable derivada para normalizar por tamaño de municipio (2
   personas de 200 empleados no es lo mismo que 2 de 20).
+- **`FLAG_PERSONAL_INCONSISTENTE`** (agregado tras el diagnóstico de
+  calidad de datos de la capa Gold, ver
+  `Docs/diagnostico-calidad-gold.md`): el personal del área tributaria
+  es, lógicamente, un subconjunto del personal total — no puede ser
+  mayor. 52 filas de RENAMU (dato auto-reportado por la municipalidad,
+  no un bug del pipeline) violan esto, produciendo 38 casos de
+  `PCT_PERSONAL_TRIBUTARIO > 100%` (caso extremo: 44 personas en el área
+  tributaria contra 1 de personal total → 4400%). Se agregó
+  `CASE WHEN P32_1_T > P19D_T THEN 1 ELSE 0 END` — NULL en cualquiera de
+  los dos lados no dispara el `CASE`, queda en 0 por diseño. No se
+  corrigió `PCT_PERSONAL_TRIBUTARIO` — sigue calculándose igual, ahora
+  con el flag al lado para que el dashboard decida si lo excluye.
+  Verificado: 52 de 7,547 filas marcadas, exacto al diagnóstico.
+- **`PCT_CANON`** (agregado a pedido, no salió del diagnóstico
+  sistemático — ver `Docs/diagnostico-calidad-gold.md`): canon sobre el
+  total sin deuda, tomado de `gold.AUTONOMIA_FISCAL` por `UBIGEO+ANO`
+  (no recalculado — `CAST(MONTO_CANON AS FLOAT) /
+  NULLIF(MONTO_TOTAL_SIN_DEUDA, 0)`, `LEFT JOIN`, `NULL` si no hay
+  match). Al cargarlo apareció un valor fuera de `[0,1]`: 717% en
+  Incahuasi (140203) 2022, la misma fila que ya tiene
+  `FLAG_DENOMINADOR_NEGATIVO = 1` en `AUTONOMIA_FISCAL` (canon negativo
+  sobre denominador también negativo → cociente positivo sin
+  significado de negocio). Se corrigió: `PCT_CANON` queda en `NULL`
+  cuando `FLAG_DENOMINADOR_NEGATIVO = 1` — un denominador sin sentido de
+  negocio no debe producir un ratio derivado con apariencia de válido.
+  Nota: esto es distinto del criterio de `RATIO_AUTONOMIA` en
+  `AUTONOMIA_FISCAL`, que para esa misma fila deja el valor real (-1.45)
+  visible y marcado en vez de en `NULL` (ver "Fórmula de autonomía
+  fiscal") — son dos decisiones de diseño separadas, cada una
+  documentada donde corresponde, no una inconsistencia. Verificado:
+  7,547 filas (sin cambio), 1 `NULL` (Incahuasi 2022), rango del resto
+  en `[0.00007%, 98.9%]`.
 - `FLAG_CUMPLIMIENTO_ATIPICO` se arrastra de `meta_predial` — **crítico
   para esta tabla**: sin excluirlo, los 58 casos atípicos (tipo
   Sapallanga) inflan los promedios de categorías chicas hasta valores
@@ -904,6 +1009,50 @@ y necesito entender el porqué, no solo el código.
 ### Segmentación geográfica
 - Una sola columna con: Lima Metropolitana / Lima Provincias / Norte /
   Centro / Sur / Oriente. Cada departamento cae en exactamente una.
+
+### Por qué mediana (no solo promedio) en los indicadores del proyecto
+- Los montos y ratios de este proyecto son consistentemente **asimétricos
+  hacia la derecha**: unas pocas municipalidades grandes o ricas (Lima,
+  San Isidro, Miraflores) empujan el promedio muy por encima de lo que
+  vive la municipalidad típica. Confirmado con datos, no supuesto: la
+  **autonomía fiscal promedio** es 11.75%, pero la **mediana** ronda solo
+  6% — la mitad de las municipalidades del país está en la mitad de esa
+  cifra o menos (ver "Autonomía fiscal promedio de las municipalidades
+  peruanas" más arriba). Mismo patrón en cumplimiento predial por
+  categoría (ej. categoría C: 70.0% promedio vs. 72.9% mediana — acá van
+  en la misma dirección, pero en otras categorías divergen más).
+- Regla de trabajo: **cuando un indicador puede tener outliers de
+  tamaño, se reporta o se calcula con mediana además del promedio, nunca
+  solo con promedio** — mostrar solo el promedio esconde que "la
+  municipalidad típica" está peor (o mejor) que el número headline. Esto
+  se aplicó en tres lugares concretos, cada uno documentado en su propia
+  sección, con una razón específica además del principio general:
+  - **Reporte de autonomía fiscal**: se muestran ambas cifras (11.75%
+    promedio, ~6% mediana) en vez de solo el promedio.
+  - **`FLAG_EMISION_ATIPICA_ALTA`**: la línea base de cada municipio es
+    su propia **mediana** histórica, no su promedio — con solo 3-4 años
+    de datos por municipio, un promedio se distorsiona con la primera
+    fila anómala que aparece (el mismo año que se está evaluando), la
+    mediana es mucho más robusta a un solo punto extremo.
+  - **`POTENCIAL_RECAUDACION`**: acá se fue un paso más allá — ni
+    siquiera mediana, sino **percentil 75** — porque la mediana misma
+    degenera a 0% en categorías de bajo desempeño (G), y "compararte
+    contra la mitad peor de tus pares" no es una meta útil (ver esa
+    sección para el detalle completo de por qué P75 y no mediana ahí).
+
+### Conexión a Power BI — decisiones de modelo
+- **`gold.RUBRO` no se conecta como tabla en el modelo de Power BI**: los
+  7 rubros ya se usaron en tiempo de carga (dentro de
+  `gold.sp_cargar_autonomia_fiscal`) para producir columnas
+  pre-agregadas por municipalidad-año (`MONTO_RECURSOS_PROPIOS`,
+  `MONTO_TRANSFERENCIAS`, `MONTO_CANON`, `MONTO_DEUDA` en
+  `gold.AUTONOMIA_FISCAL`) — el dashboard consume esas columnas
+  directamente, no necesita desagregar por rubro fila por fila. Conectar
+  `gold.RUBRO` como dimensión aparte sería una tabla sin ningún visual
+  que la use, añadiendo una relación de más al modelo sin necesidad. La
+  tabla se queda en el esquema de SQL Server como documentación de la
+  regla de negocio (qué rubro entra en qué componente), no como parte
+  del modelo de Power BI.
 
 ### Lecciones aprendidas (qué se haría distinto empezando de nuevo)
 - **Llave de `gold.RUBRO` por nombre, no por código**: el `JOIN` entre

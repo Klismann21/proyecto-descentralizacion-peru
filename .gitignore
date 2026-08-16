@@ -1,6 +1,6 @@
-data/bronze/*
+Data/bronze/*
 !Data/bronze/.gitkeep
-data/silver/*
+Data/silver/*
 !Data/silver/.gitkeep
 __pycache__/
 *.pyc
